@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#10b981"/>
+  <g fill="none" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <!-- awning -->
+    <path d="M12 24 L52 24 L48 32 L16 32 Z" fill="#ffffff" fill-opacity="0.18"/>
+    <!-- storefront body -->
+    <path d="M16 32 L16 50 L48 50 L48 32"/>
+    <!-- door -->
+    <path d="M28 50 L28 40 L36 40 L36 50"/>
+    <!-- window accents -->
+    <path d="M19 36 L24 36 M19 40 L24 40"/>
+    <path d="M40 36 L45 36 M40 40 L45 40"/>
+    <!-- roof line -->
+    <path d="M14 24 L32 14 L50 24"/>
+  </g>
+</svg>

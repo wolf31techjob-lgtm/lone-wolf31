@@ -1,0 +1,108 @@
+// Prisma schema for Store Update Monitor
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String    @id @default(cuid())
+  username  String    @unique
+  password  String
+  role      String    @default("sd") // "sa" | "admin" | "sd"
+  fullName  String?
+  createdAt DateTime  @default(now())
+  sessions  Session[]
+  updates   Update[]
+  statuses  StoreStatus[]
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token      String   @unique
+  createdAt  DateTime @default(now())
+  lastActive DateTime @default(now())
+  expiresAt  DateTime
+}
+
+model Store {
+  id             String    @id @default(cuid())
+  storeId        String    @unique // ID# from Excel (e.g. "001")
+  hashCode       String    @unique // Hashcode from Excel (e.g. "A1B2C3")
+  storeNumber    String?   // Store Number from Excel (e.g. "ST-001")
+  name           String
+  region         String    // e.g. "Manitoba" | "Edmonton" | "Calgary"
+  area           String?   // Manitoba | Edmonton | Calgary (drives 3-column grouping)
+  branch         String?
+  address        String?   // City/address
+  brand          String?   // KFC | KT (KFC/TacoBell)
+  operationHours String?   // e.g. "Mon-Sun 07:00-23:00"
+  disabled       Boolean   @default(false)
+  disabledReason String?
+  disabledAt     DateTime?
+  disabledById   String?
+  lockedById     String?
+  lockedAt       DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  updates        Update[]
+  statuses       StoreStatus[]
+
+  @@index([disabled])
+  @@index([region])
+  @@index([area])
+  @@index([lockedById])
+}
+
+model StoreStatus {
+  id          String    @id @default(cuid())
+  storeId     String
+  store       Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  status      String    // alerting | boh-offline | cfc-error | network-down | power-outage | other-issues
+  description String?
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime  @default(now())
+  clearedAt   DateTime?
+
+  @@index([storeId])
+  @@index([status])
+  @@index([clearedAt])
+}
+
+model Update {
+  id          String    @id @default(cuid())
+  storeId     String
+  store       Store     @relation(fields: [storeId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        String // "cfc-refresh" | "aoo-manual-import" | "menu-pull" | "deliverect-menu-pull"
+  status      String // "completed" | "in-progress" | "alerting" | "boh-offline" | "cfc-error" | "network-down" | "power-outage" | "other-issues"
+  notes       String?
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  undoneAt    DateTime?
+  undoneById  String?
+
+  @@index([storeId])
+  @@index([userId])
+  @@index([status])
+  @@index([type])
+}
+
+model PushUpdate {
+  id          String   @id @default(cuid())
+  title       String
+  subject     String
+  content     String
+  createdById String
+  createdAt   DateTime @default(now())
+  active      Boolean  @default(true)
+
+  @@index([active])
+}
