@@ -2,12 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 
 /**
- * Returns a downloadable Excel template (.xlsx) with all 10 columns:
- *   ID# | Hashcode | Store Number | Store Name | Region | Area | Branch
+ * Returns a downloadable Excel template (.xlsx) with 9 columns:
+ *   ID# | Hashcode | Store Number | Store Name | Region | Area
  *   | Address | Brand | Operation Hours
- *
- * Pre-filled with sample rows so the SA/Admin knows the expected format.
- * No auth required — the template is a public reference.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -19,7 +16,6 @@ export async function GET(req: NextRequest) {
         "Store Name": "Winnipeg Polo Park",
         Region: "Manitoba",
         Area: "Manitoba",
-        Branch: "Winnipeg",
         Address: "Winnipeg, MB",
         Brand: "KFC",
         "Operation Hours": "Mon-Sun 07:00-23:00",
@@ -31,7 +27,6 @@ export async function GET(req: NextRequest) {
         "Store Name": "Winnipeg St. Vital",
         Region: "Manitoba",
         Area: "Manitoba",
-        Branch: "Winnipeg",
         Address: "Winnipeg, MB",
         Brand: "KT",
         "Operation Hours": "Mon-Sun 08:00-22:00",
@@ -43,7 +38,6 @@ export async function GET(req: NextRequest) {
         "Store Name": "Edmonton West Edmonton Mall",
         Region: "Edmonton",
         Area: "Edmonton",
-        Branch: "Edmonton",
         Address: "Edmonton, AB",
         Brand: "KFC",
         "Operation Hours": "Mon-Sun 07:00-23:00",
@@ -55,7 +49,6 @@ export async function GET(req: NextRequest) {
         "Store Name": "Calgary Chinook Centre",
         Region: "Calgary",
         Area: "Calgary",
-        Branch: "Calgary",
         Address: "Calgary, AB",
         Brand: "KT",
         "Operation Hours": "Mon-Sun 07:00-23:00",
@@ -67,7 +60,6 @@ export async function GET(req: NextRequest) {
         "Store Name": "Calgary CrossIron Mills",
         Region: "Calgary",
         Area: "Calgary",
-        Branch: "Calgary",
         Address: "Calgary, AB",
         Brand: "KFC",
         "Operation Hours": "24/7",
@@ -76,7 +68,7 @@ export async function GET(req: NextRequest) {
 
     const ws = XLSX.utils.json_to_sheet(data);
 
-    // Make every column wide enough to be readable
+    // Adjusted column widths (Branch removed)
     ws["!cols"] = [
       { wch: 10 }, // ID#
       { wch: 14 }, // Hashcode
@@ -84,7 +76,6 @@ export async function GET(req: NextRequest) {
       { wch: 32 }, // Store Name
       { wch: 12 }, // Region
       { wch: 12 }, // Area
-      { wch: 18 }, // Branch
       { wch: 22 }, // Address
       { wch: 10 }, // Brand
       { wch: 28 }, // Operation Hours
