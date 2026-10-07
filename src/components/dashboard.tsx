@@ -142,7 +142,6 @@ interface StoreRow {
   name: string;
   region: string;
   area: string | null;
-  branch: string | null;
   address: string | null;
   brand: string | null;
   operationHours: string | null;
