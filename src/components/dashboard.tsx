@@ -1346,7 +1346,7 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
                         Upload an .xlsx file with columns:{" "}
                         <span className="font-semibold">
                           ID#, Hashcode, Store Number, Store Name, Region, Area,
-                          Branch, Address, Brand, Operation Hours
+                          Address, Brand, Operation Hours
                         </span>
                         . Existing stores (matched by ID#) will be updated; new
                         ones will be created. Tick "Replace all" to wipe the
@@ -3017,7 +3017,7 @@ function ExcelDropzone({
         {uploading ? "Uploading…" : "Click to browse or drop .xlsx here"}
       </p>
       <p className="text-[11px] text-gray-500 mt-0.5">
-        Accepted: .xlsx files with the 10-column template
+        Accepted: .xlsx files with the 9-column template
       </p>
     </div>
   );
