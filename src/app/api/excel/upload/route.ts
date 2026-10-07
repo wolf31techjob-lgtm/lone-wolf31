@@ -29,14 +29,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 3. Read Excel file in memory (No fs.writeFile)
+    // 3. Read Excel file in memory
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     const workbook = XLSX.read(buffer, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
-    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName]);
+    
+    // Use defval: null to ensure empty cells are read as null, and raw: false for strings
+    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: null, raw: false });
 
-    // 4. Process and save to Neon Database
     const errors: string[] = [];
     let created = 0;
     let updated = 0;
@@ -59,9 +60,18 @@ export async function POST(req: NextRequest) {
       const rowIndex = i + 2; // Excel rows start at 1, and row 1 is header
       
       try {
-        const storeId = row["ID#"] ? String(row["ID#"]).trim() : null;
-        const hashCode = row["Hashcode"] ? String(row["Hashcode"]).trim() : null;
-        const name = row["Store Name"] ? String(row["Store Name"]).trim() : null;
+        // Resilient header matching (Case-insensitive and trims hidden spaces)
+        const getVal = (key: string) => {
+          const foundKey = Object.keys(row).find(
+            k => k.trim().toLowerCase() === key.toLowerCase()
+          );
+          const val = foundKey ? row[foundKey] : null;
+          return val !== null && val !== undefined ? String(val).trim() : null;
+        };
+
+        const storeId = getVal("ID#");
+        const hashCode = getVal("Hashcode");
+        const name = getVal("Store Name");
 
         if (!storeId || !hashCode || !name) {
           errors.push(`Row ${rowIndex}: Missing ID#, Hashcode, or Store Name. Skipped.`);
@@ -69,14 +79,13 @@ export async function POST(req: NextRequest) {
           continue;
         }
 
-        const storeNumber = row["Store Number"] ? String(row["Store Number"]) : null;
-        const region = row["Region"] ? String(row["Region"]) : "Manitoba";
-        const area = row["Area"] ? String(row["Area"]) : null;
-        // Branch is removed from the new template, so it will be null
-        const branch = row["Branch"] ? String(row["Branch"]) : null; 
-        const address = row["Address"] ? String(row["Address"]) : null;
-        const brand = row["Brand"] ? String(row["Brand"]) : null;
-        const operationHours = row["Operation Hours"] ? String(row["Operation Hours"]) : null;
+        const storeNumber = getVal("Store Number");
+        const region = getVal("Region") || "Manitoba";
+        const area = getVal("Area");
+        const branch = getVal("Branch"); // Will be null if removed from Excel
+        const address = getVal("Address");
+        const brand = getVal("Brand");
+        const operationHours = getVal("Operation Hours");
 
         if (!replace && existingStoreIds.has(storeId)) {
           // Update existing store
