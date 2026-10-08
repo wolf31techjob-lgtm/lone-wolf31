@@ -36,21 +36,19 @@ export async function GET(req: NextRequest) {
       where.disabled = false;
     }
 
-    if (search) {
-      const s = search.toLowerCase();
+         if (search) {
       where.OR = [
-        { storeId: { contains: s } },
-        { hashCode: { contains: s } },
-        { storeNumber: { contains: s } },
-        { name: { contains: s } },
-        { region: { contains: s } },
-        { area: { contains: s } },
-        { branch: { contains: s } },
-        { address: { contains: s } },
-        { brand: { contains: s } },
+        { storeId: { contains: search, mode: "insensitive" } },
+        { hashCode: { contains: search, mode: "insensitive" } },
+        { storeNumber: { contains: search, mode: "insensitive" } },
+        { name: { contains: search, mode: "insensitive" } },
+        { region: { contains: search, mode: "insensitive" } },
+        { area: { contains: search, mode: "insensitive" } },
+        { address: { contains: search, mode: "insensitive" } },
+        { brand: { contains: search, mode: "insensitive" } },
+        { operationHours: { contains: search, mode: "insensitive" } },
       ];
     }
-
     const stores = await db.store.findMany({
       where,
       orderBy: [{ disabled: "asc" }, { storeId: "asc" }],
