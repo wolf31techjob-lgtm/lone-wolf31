@@ -2827,8 +2827,24 @@ function StoreCard({
         </div>
       )}
 
-      {/* Bottom action row: flag/clear, disable/enable.
+           {/* Bottom action row: flag/clear, disable/enable.
           Once both CFC + AOO are completed, ALL buttons here are locked. */}
+
+      {/* 1. Kapag naka-DISABLE ang store, ipapakita lang ang ENABLE button (para SA/Admin) */}
+      {store.disabled && canEnableStores && (
+        <div className="px-3 pb-3 flex items-center justify-end">
+          <button
+            onClick={() => onEnable(store)}
+            disabled={busy}
+            className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11.5px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed ml-auto"
+          >
+            <Power className="w-3 h-3" />
+            Enable
+          </button>
+        </div>
+      )}
+
+      {/* 2. Kapag ACTIVE ang store, ipapakita ang Flag issue at Disable buttons */}
       {!store.disabled && !allButtonsLocked && (
         <div className="px-3 pb-3 flex items-center gap-1.5 flex-wrap">
           {activeStatus ? (
@@ -2863,19 +2879,8 @@ function StoreCard({
               Disable
             </button>
           )}
-          {canEnableStores && store.disabled && (
-            <button
-              onClick={() => onEnable(store)}
-              disabled={busy}
-              className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11.5px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed ml-auto"
-            >
-              <Power className="w-3 h-3" />
-              Enable
-            </button>
-          )}
         </div>
       )}
-
       {/* When both CFC + AOO are completed, show a "Completed" banner instead of buttons */}
       {allButtonsLocked && !store.disabled && (
         <div className="px-3 pb-3">
