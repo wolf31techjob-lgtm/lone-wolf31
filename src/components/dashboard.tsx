@@ -2582,12 +2582,6 @@ function StoreCard({
   const lockedByMe = store.lockedById === currentUserId;
 
   // Per-store button gating
-  // CFC: once completed, permanently locked — only Reset can clear it.
-  //      Flag issues DO block CFC/AOO per-store execution (user must clear the flag first).
-  // AOO: unlocked ONLY when CFC is completed (but AOO not yet completed).
-  //      Once AOO is completed, ALL buttons in the store box are permanently locked.
-  // NOTE: Flag issues do NOT block bulk Menu Pull or Deliverect — those are
-  //       separate bulk operations that run regardless of per-store flags.
   const cfcCompleted = store.cfcDone;
   const aooCompleted = store.aooDone;
   const bothCompleted = cfcCompleted && aooCompleted;
@@ -2599,7 +2593,7 @@ function StoreCard({
     cfcCompleted ||
     allButtonsLocked ||
     store.disabled ||
-    !!activeStatus ||      // flag issue blocks CFC per-store execution
+    !!activeStatus ||
     !store.canPush ||
     lockedByOther;
 
@@ -2607,10 +2601,14 @@ function StoreCard({
     aooCompleted ||
     allButtonsLocked ||
     store.disabled ||
-    !!activeStatus ||      // flag issue blocks AOO per-store execution
+    !!activeStatus ||
     !store.canPush ||
     lockedByOther ||
     !store.cfcDone;
+
+  // --- NEW: Condition for animation ---
+  const isMenuOrDeliverectCompleted =
+    menu?.status === "completed" || deliverect?.status === "completed";
 
   // Operation hours color coding
   const hoursClass = useMemo(() => {
@@ -2620,7 +2618,6 @@ function StoreCard({
     return "bg-white text-gray-700 border-gray-200";
   }, [store.operationHours]);
 
-  // The "Done" button shows for any in-progress latest update (CFC/AOO/Menu/Deliverect)
   const inProgressUpdate =
     cfc?.status === "in-progress"
       ? cfc
@@ -2634,9 +2631,14 @@ function StoreCard({
 
   return (
     <div
+      // --- NEW: Animation and Highlight Classes added here ---
       className={`rounded-xl bg-white ring-1 ${
-        activeStatus ? "ring-rose-200" : "ring-gray-200"
-      } shadow-sm overflow-hidden`}
+        activeStatus
+          ? "ring-rose-200"
+          : isMenuOrDeliverectCompleted
+          ? "ring-emerald-400 shadow-emerald-200 shadow-lg animate-pulse"
+          : "ring-gray-200"
+      } shadow-sm overflow-hidden transition-all duration-300`}
     >
       {/* Top: store-number blue box + ID#/hash */}
       <div className="flex items-stretch">
@@ -2785,6 +2787,28 @@ function StoreCard({
         </div>
       )}
 
+      {/* --- NEW: CFC & AOO Execution Logs --- */}
+      {(cfc || aoo) && (
+        <div className="mx-3 mb-2 rounded-md bg-gray-50 border border-gray-100 px-2.5 py-1.5 text-[11px] text-gray-600 space-y-1">
+          {cfc && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-emerald-700">CFC Refresh:</span>
+              <span className="text-right truncate">
+                {cfc.fullName || cfc.username} · {timeAgo(cfc.startedAt)}
+              </span>
+            </div>
+          )}
+          {aoo && (
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-semibold text-amber-700">AOO Import:</span>
+              <span className="text-right truncate">
+                {aoo.fullName || aoo.username} · {timeAgo(aoo.startedAt)}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Per-store action buttons: CFC + AOO (when not disabled) */}
       {!store.disabled && (
         <div className="px-3 pb-2 grid grid-cols-2 gap-1.5">
@@ -2826,9 +2850,6 @@ function StoreCard({
           />
         </div>
       )}
-
-           {/* Bottom action row: flag/clear, disable/enable.
-          Once both CFC + AOO are completed, ALL buttons here are locked. */}
 
       {/* 1. Kapag naka-DISABLE ang store, ipapakita lang ang ENABLE button (para SA/Admin) */}
       {store.disabled && canEnableStores && (
@@ -2881,6 +2902,7 @@ function StoreCard({
           )}
         </div>
       )}
+      
       {/* When both CFC + AOO are completed, show a "Completed" banner instead of buttons */}
       {allButtonsLocked && !store.disabled && (
         <div className="px-3 pb-3">
