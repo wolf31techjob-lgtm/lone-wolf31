@@ -2606,9 +2606,12 @@ function StoreCard({
     lockedByOther ||
     !store.cfcDone;
 
-  // --- NEW: Condition for animation ---
-  const isMenuOrDeliverectCompleted =
-    menu?.status === "completed" || deliverect?.status === "completed";
+ // --- UPDATED: Condition for animation ---
+  // Mag-a-animate kapag completed na ang CFC + AOO (bothDone) O kapag completed na ang Menupull/Deliverect
+  const shouldAnimate =
+    store.bothDone ||
+    menu?.status === "completed" ||
+    deliverect?.status === "completed";
 
   // Operation hours color coding
   const hoursClass = useMemo(() => {
@@ -2631,11 +2634,11 @@ function StoreCard({
 
   return (
     <div
-      // --- NEW: Animation and Highlight Classes added here ---
+      // --- UPDATED: Using shouldAnimate variable ---
       className={`rounded-xl bg-white ring-1 ${
         activeStatus
           ? "ring-rose-200"
-          : isMenuOrDeliverectCompleted
+          : shouldAnimate
           ? "ring-emerald-400 shadow-emerald-200 shadow-lg animate-pulse"
           : "ring-gray-200"
       } shadow-sm overflow-hidden transition-all duration-300`}
