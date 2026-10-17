@@ -2664,25 +2664,31 @@ function StoreCard({
         </div>
 
         {/* ID# + hash + name + address */}
-        <div className="flex-1 px-3 py-2.5 min-w-0">
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="text-emerald-700 font-bold text-sm tabular-nums">
-              ID# {store.storeId}
-            </span>
-            <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-[11px] font-bold text-amber-800">
-              <span className="font-mono">{store.hashCode}</span>
-            </span>
-          </div>
-          <div className="text-[13px] font-semibold text-gray-900 mt-0.5 truncate">
-            {store.name}
-          </div>
-          {store.address && (
-            <div className="flex items-start gap-1 text-[11.5px] text-gray-500 mt-0.5">
-              <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-gray-400" />
-              <span className="truncate">{store.address}</span>
-            </div>
-          )}
-        </div>
+<div className="flex-1 px-3 py-2.5 min-w-0">
+  {/* Upper row: ID# (kaliwa) + HashCode (kanan) — kasinglaki ng ID# */}
+  <div className="flex items-center justify-between gap-1.5">
+    {/* LEFT: ID# (original — huwag galawin) */}
+    <span className="text-emerald-700 font-bold text-sm tabular-nums">
+      ID# {store.storeId}
+    </span>
+
+    {/* RIGHT: HashCode — same size as ID# (text-sm), original amber styling */}
+    <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-sm font-bold text-amber-800">
+      <span>HashCode:</span>
+      <span className="font-mono">{store.hashCode}</span>
+    </span>
+  </div>
+
+  <div className="text-[13px] font-semibold text-gray-900 mt-0.5 truncate">
+    {store.name}
+  </div>
+  {store.address && (
+    <div className="flex items-start gap-1 text-[11.5px] text-gray-500 mt-0.5">
+      <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-gray-400" />
+      <span className="truncate">{store.address}</span>
+    </div>
+  )}
+</div>
       </div>
 
       {/* Lock / active-status indicator */}
