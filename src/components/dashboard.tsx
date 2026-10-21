@@ -33,6 +33,8 @@ import {
   RotateCcw,
   Plus,
   Headphones,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -196,6 +198,13 @@ interface OnlineUsersData {
     fullName: string | null;
     role: string;
     lastActive: string;
+    /**
+     * Optional backend-provided "current area" — populated only if the
+     * backend has been extended to track which page each user is viewing
+     * (see developer notes). When present, this takes priority over the
+     * in-progress-update proxy used by the frontend.
+     */
+    currentArea?: string | null;
   }>;
   count: number;
 }
@@ -376,6 +385,37 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
   const [flagDescription, setFlagDescription] = useState("");
   const [flagSubmitting, setFlagSubmitting] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  // Selected area page — drives the side panel + main store list view.
+  // "all" shows every area stacked; otherwise shows only that area's stores.
+  // Persisted in localStorage so the user returns to their last-viewed area.
+  const [selectedArea, setSelectedArea] = useState<string>(() => {
+    if (typeof window === "undefined") return "manitoba";
+    try {
+      const saved = window.localStorage.getItem("sum_selected_area");
+      if (
+        saved === "manitoba" ||
+        saved === "edmonton" ||
+        saved === "calgary" ||
+        saved === "other" ||
+        saved === "all"
+      ) {
+        return saved;
+      }
+    } catch {
+      // ignore localStorage errors
+    }
+    return "manitoba";
+  });
+  // Persist whenever the selected area changes
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("sum_selected_area", selectedArea);
+    } catch {
+      // ignore
+    }
+  }, [selectedArea]);
+  // Sidebar collapse state for desktop (icon-only mode for wider main area)
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   // Privilege flags derived from role
   const isSA = user.role === "sa";
@@ -386,15 +426,18 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
   const canDisableStores = isSA || user.role === "admin";
   const canEnableStores = isSA || user.role === "admin";
 
-  // Build the stores URL with query params
+  // Build the stores URL with query params.
+  // NOTE: The search term is intentionally NOT sent to the API anymore —
+  // search is now applied client-side on the visible area's stores only.
+  // This way, switching areas while searching still shows every store in
+  // the new area that matches the search term.
   const storesUrl = useMemo(() => {
     const params = new URLSearchParams();
-    if (search) params.set("search", search);
     if (showDisabled) params.set("includeDisabled", "true");
     if (statusFilter !== "all") params.set("status", statusFilter);
     const q = params.toString();
     return `/api/stores${q ? `?${q}` : ""}`;
-  }, [search, showDisabled, statusFilter]);
+  }, [showDisabled, statusFilter]);
 
   const {
     data: storesData,
@@ -583,6 +626,196 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
     }
     return { map, others };
   }, [stores]);
+
+  /* ---------------- per-area status summary ----------------
+   * Used by the side panel to show a tiny progress chip per area.
+   * ---------------------------------------------------------------- */
+  const areaSummaries = useMemo(() => {
+    const buildSummary = (list: StoreRow[]) => {
+      const total = list.length;
+      const done = list.filter((s) => s.bothDone).length;
+      const live = list.filter((s) => {
+        if (s.bothDone) return false;
+        const t = s.latestByType;
+        return (
+          t["cfc-refresh"]?.status === "in-progress" ||
+          t["aoo-manual-import"]?.status === "in-progress" ||
+          t["menu-pull"]?.status === "in-progress" ||
+          t["deliverect-menu-pull"]?.status === "in-progress"
+        );
+      }).length;
+      const alert = list.filter(
+        (s) =>
+          s.activeStatus ||
+          (s.latestUpdate && isAlertStatus(s.latestUpdate.status))
+      ).length;
+      return { total, done, live, alert };
+    };
+    return {
+      manitoba: buildSummary(storesByArea.map.Manitoba),
+      edmonton: buildSummary(storesByArea.map.Edmonton),
+      calgary: buildSummary(storesByArea.map.Calgary),
+      other: buildSummary(storesByArea.others),
+      all: buildSummary(stores),
+    };
+  }, [storesByArea, stores]);
+
+  /* ---------------- which area is each online user working on? ---------
+   * Resolution order per user:
+   *   1. Backend-provided `currentArea` field on the online-users response
+   *      (only available if the developer has extended the heartbeat +
+   *      /api/users/online endpoints — see DEVELOPER_NOTES.md).
+   *   2. Client-side proxy: scan all active stores and check whether the
+   *      user has any in-progress update (CFC / AOO / Menu Pull / Deliverect)
+   *      on a store in a given area. This requires NO backend changes.
+   * -------------------------------------------------------------------- */
+  const userAreaMap = useMemo(() => {
+    const map: Record<string, { area: string; storeName: string; storeNumber: string | null } | { area: "multiple"; storeName: null; storeNumber: null }> = {};
+    for (const u of onlineUsers) {
+      // Normalize backend-provided area string to one of:
+      // Manitoba / Edmonton / Calgary / Other / multiple / idle
+      const normalizeBackendArea = (raw: string | null | undefined): string | null => {
+        if (!raw) return null;
+        const v = String(raw).trim().toLowerCase();
+        if (v === "manitoba") return "Manitoba";
+        if (v === "edmonton") return "Edmonton";
+        if (v === "calgary") return "Calgary";
+        if (v === "other" || v === "other areas") return "Other";
+        if (v === "all" || v === "multiple") return "multiple";
+        if (v === "idle" || v === "") return "idle";
+        // Unknown string — try to match by substring
+        if (v.includes("manitoba")) return "Manitoba";
+        if (v.includes("edmonton")) return "Edmonton";
+        if (v.includes("calgary")) return "Calgary";
+        return null;
+      };
+
+      const backendArea = normalizeBackendArea(u.currentArea);
+      if (backendArea) {
+        map[u.id] = { area: backendArea, storeName: "", storeNumber: null };
+        continue;
+      }
+
+      // Fallback: client-side proxy via in-progress updates
+      const areas: Set<string> = new Set();
+      let firstStoreName: string | null = null;
+      let firstStoreNumber: string | null = null;
+      for (const s of allActiveStores) {
+        const types = [
+          "cfc-refresh",
+          "aoo-manual-import",
+          "menu-pull",
+          "deliverect-menu-pull",
+        ] as const;
+        for (const t of types) {
+          const upd = s.latestByType[t];
+          if (upd && upd.status === "in-progress" && upd.userId === u.id) {
+            const areaKey = (s.area || s.region || "").trim().toLowerCase();
+            const normalized =
+              areaKey === "manitoba"
+                ? "Manitoba"
+                : areaKey === "edmonton"
+                ? "Edmonton"
+                : areaKey === "calgary"
+                ? "Calgary"
+                : "Other";
+            areas.add(normalized);
+            if (firstStoreName === null) {
+              firstStoreName = s.name;
+              firstStoreNumber = s.storeNumber;
+            }
+            break; // one match per store is enough
+          }
+        }
+      }
+      if (areas.size === 0) {
+        map[u.id] = { area: "idle", storeName: null, storeNumber: null };
+      } else if (areas.size === 1) {
+        const only = Array.from(areas)[0];
+        map[u.id] = {
+          area: only,
+          storeName: firstStoreName ?? "",
+          storeNumber: firstStoreNumber,
+        };
+      } else {
+        map[u.id] = { area: "multiple", storeName: null, storeNumber: null };
+      }
+    }
+    return map;
+  }, [onlineUsers, allActiveStores]);
+
+  /* ---------------- the store list currently shown on the main page ---
+   * Driven by selectedArea: "manitoba" / "edmonton" / "calgary" / "other" / "all".
+   * After area filtering, the search term is also applied client-side so the
+   * search box only affects the currently visible area (not the global list).
+   * -------------------------------------------------------------------- */
+  const visibleStores = useMemo(() => {
+    let list: StoreRow[];
+    switch (selectedArea) {
+      case "manitoba":
+        list = storesByArea.map.Manitoba;
+        break;
+      case "edmonton":
+        list = storesByArea.map.Edmonton;
+        break;
+      case "calgary":
+        list = storesByArea.map.Calgary;
+        break;
+      case "other":
+        list = storesByArea.others;
+        break;
+      case "all":
+      default:
+        list = stores;
+        break;
+    }
+    // Apply the local search term to the area-filtered list
+    if (!search.trim()) return list;
+    const q = search.trim().toLowerCase();
+    return list.filter((s) => {
+      return (
+        (s.storeId || "").toLowerCase().includes(q) ||
+        (s.hashCode || "").toLowerCase().includes(q) ||
+        (s.storeNumber || "").toLowerCase().includes(q) ||
+        (s.name || "").toLowerCase().includes(q) ||
+        (s.region || "").toLowerCase().includes(q) ||
+        (s.area || "").toLowerCase().includes(q) ||
+        (s.address || "").toLowerCase().includes(q) ||
+        (s.brand || "").toLowerCase().includes(q)
+      );
+    });
+  }, [selectedArea, storesByArea, stores, search]);
+
+  /* ---------------- heartbeat ping with current area -----------
+   * Sends the user's currently-viewed area to the existing heartbeat
+   * endpoint as a JSON body. The backend will simply ignore the body
+   * if it doesn't read it (POSTs with bodies are valid HTTP). When the
+   * developer extends the heartbeat endpoint to persist `currentArea`,
+   * this feature activates automatically — no frontend changes needed.
+   * Fires on mount, on area change, and every 25s as a keep-alive.
+   * ------------------------------------------------------------- */
+  useEffect(() => {
+    if (!token) return;
+    const ping = () => {
+      try {
+        fetch("/api/auth/heartbeat", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ currentArea: selectedArea }),
+        }).catch(() => {
+          // ignore transient heartbeat failures
+        });
+      } catch {
+        // ignore
+      }
+    };
+    ping();
+    const id = window.setInterval(ping, 25_000);
+    return () => window.clearInterval(id);
+  }, [token, selectedArea]);
 
   /* ---------------- handlers ---------------- */
   function handleRefresh() {
@@ -1292,7 +1525,45 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
         </div>
       </header>
 
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-8">
+      {/* Two-column layout: left sidebar (area navigation) + right main content.
+          On mobile the sidebar collapses to a horizontal pill row at the top
+          of the main column. On desktop, the sidebar can also be manually
+          collapsed (icon-only) via the small toggle button below. */}
+      <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-8 flex flex-col md:flex-row gap-4 lg:gap-6">
+        {/* ========================================================== *
+            Sidebar — area navigation (desktop only)
+         * ========================================================== */}
+        <aside
+          className={`hidden md:flex flex-col shrink-0 transition-[width] duration-300 ${
+            sidebarCollapsed ? "w-12" : "w-56 lg:w-60"
+          }`}
+          aria-label="Area navigation"
+        >
+          <AreaSidePanel
+            selectedArea={selectedArea}
+            onSelect={(a) => setSelectedArea(a)}
+            summaries={areaSummaries}
+            currentUserArea={userAreaMap[user.id]?.area ?? "idle"}
+            collapsed={sidebarCollapsed}
+            onToggleCollapse={() => setSidebarCollapsed((v) => !v)}
+          />
+        </aside>
+
+        {/* Mobile area nav — horizontal pills at the top of the main column */}
+        <div className="md:hidden -mx-4 sm:-mx-6 px-4 sm:px-6 sticky top-14 z-20 bg-white/90 backdrop-blur py-2 border-b border-gray-200">
+          <div className="flex items-center gap-1.5 overflow-x-auto custom-scroll">
+            <AreaSidePanel
+              selectedArea={selectedArea}
+              onSelect={(a) => setSelectedArea(a)}
+              summaries={areaSummaries}
+              currentUserArea={userAreaMap[user.id]?.area ?? "idle"}
+              variant="mobile"
+            />
+          </div>
+        </div>
+
+        {/* Main column — wraps everything else */}
+        <main className="flex-1 min-w-0 flex flex-col">
         {/* Greeting + GIF */}
         <div className="mb-6 grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6 items-stretch">
           {/* Greeting (left, 2 cols) */}
@@ -1567,7 +1838,12 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
 
         {/* Online users */}
         <div className="mb-6">
-          <OnlineUsersCard users={onlineUsers} currentUserId={user.id} />
+          <OnlineUsersCard
+            users={onlineUsers}
+            currentUserId={user.id}
+            userAreaMap={userAreaMap}
+            onSelectArea={(a) => setSelectedArea(a)}
+          />
         </div>
 
         {/* Bulk operations bar */}
@@ -1714,7 +1990,7 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
               <Input
-                placeholder="Search ID#, hashcode, store, region, area, address, brand…"
+                placeholder="Search within this area: ID#, hashcode, store, address, brand…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="h-9 pl-8 bg-gray-50 border-gray-200 text-sm"
@@ -1744,7 +2020,9 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
           </div>
         )}
 
-        {/* Stores by Area — 3 fixed columns */}
+        {/* Stores for the currently selected area page.
+            Switching areas re-mounts this container (via `key={selectedArea}`)
+            which triggers the `animate-area-page-in` transition. */}
         {storesLoading && stores.length === 0 ? (
           <div className="rounded-2xl bg-white shadow-sm ring-1 ring-gray-100 p-10 text-center text-sm text-gray-500">
             Loading stores…
@@ -1760,87 +2038,39 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
               : "Ask an admin to upload the store list."}
           </div>
         ) : (
-          <>
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
-              {AREA_COLUMNS.map((area) => (
-                <AreaColumn
-                  key={area}
-                  area={area}
-                  stores={storesByArea.map[area]}
-                  busyStoreId={busyStoreId}
-                  currentUserId={user.id}
-                  isSA={isSA}
-                  canDisableStores={canDisableStores}
-                  canEnableStores={canEnableStores}
-                  onPush={pushStoreUpdate}
-                  onMarkDone={markUpdateDone}
-                  onUndo={undoUpdate}
-                  onFlag={(store) => {
-                    setFlagTarget(store);
-                    setFlagStatus("");
-                    setFlagDescription("");
-                  }}
-                  onClearFlag={clearFlag}
-                  onDisable={(store) => {
-                    setDisableTarget(store);
-                    setDisableReason("");
-                  }}
-                  onEnable={enableStore}
-                />
-              ))}
-            </div>
-
-            {/* Other Areas (stores that didn't match Manitoba/Edmonton/Calgary) */}
-            {storesByArea.others.length > 0 && (
-              <section className="mb-6">
-                <div className="rounded-2xl bg-white shadow-sm ring-1 ring-gray-100 p-4 md:p-5">
-                  <div className="flex items-center gap-2 mb-3">
-                    <MapPin className="w-4 h-4 text-gray-500" />
-                    <h2 className="text-sm font-semibold text-gray-800">
-                      Other areas
-                    </h2>
-                    <Badge className="bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-100">
-                      {storesByArea.others.length}
-                    </Badge>
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-                    {storesByArea.others.map((s) => (
-                      <StoreCard
-                        key={s.id}
-                        store={s}
-                        busy={busyStoreId === s.id}
-                        currentUserId={user.id}
-                        isSA={isSA}
-                        canDisableStores={canDisableStores}
-                        canEnableStores={canEnableStores}
-                        onPush={pushStoreUpdate}
-                        onMarkDone={markUpdateDone}
-                        onUndo={undoUpdate}
-                        onFlag={(store) => {
-                          setFlagTarget(store);
-                          setFlagStatus("");
-                          setFlagDescription("");
-                        }}
-                        onClearFlag={clearFlag}
-                        onDisable={(store) => {
-                          setDisableTarget(store);
-                          setDisableReason("");
-                        }}
-                        onEnable={enableStore}
-                      />
-                    ))}
-                  </div>
-                </div>
-              </section>
-            )}
-          </>
+          <AreaPage
+            key={selectedArea}
+            area={selectedArea}
+            stores={visibleStores}
+            summaries={areaSummaries}
+            busyStoreId={busyStoreId}
+            currentUserId={user.id}
+            isSA={isSA}
+            canDisableStores={canDisableStores}
+            canEnableStores={canEnableStores}
+            onPush={pushStoreUpdate}
+            onMarkDone={markUpdateDone}
+            onUndo={undoUpdate}
+            onFlag={(store) => {
+              setFlagTarget(store);
+              setFlagStatus("");
+              setFlagDescription("");
+            }}
+            onClearFlag={clearFlag}
+            onDisable={(store) => {
+              setDisableTarget(store);
+              setDisableReason("");
+            }}
+            onEnable={enableStore}
+          />
         )}
 
         <footer className="mt-auto pt-6 text-center text-[11.5px] text-gray-400">
           Store Update Monitor · Operations Dashboard ·{" "}
           {new Date().getFullYear()} · Developed by Mr. Raymond M. Reintegrado
         </footer>
-      </main>
+        </main>
+      </div>
 
       {/* Push-update editor dialog */}
       <Dialog open={pushEditOpen} onOpenChange={setPushEditOpen}>
@@ -2196,18 +2426,66 @@ function KpiCard({
 function OnlineUsersCard({
   users,
   currentUserId,
+  userAreaMap,
+  onSelectArea,
 }: {
   users: OnlineUsersData["users"];
   currentUserId: string;
+  userAreaMap: Record<
+    string,
+    {
+      area: string;
+      storeName: string | null;
+      storeNumber: string | null;
+    }
+  >;
+  onSelectArea: (area: string) => void;
 }) {
+  // Area badge style mapping — color-coded per area for quick visual scan.
+  const areaBadgeClass = (area: string): string => {
+    switch (area) {
+      case "Manitoba":
+        return "bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100";
+      case "Edmonton":
+        return "bg-sky-50 text-sky-700 border-sky-200 hover:bg-sky-100";
+      case "Calgary":
+        return "bg-violet-50 text-violet-700 border-violet-200 hover:bg-violet-100";
+      case "Other":
+        return "bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-200";
+      case "multiple":
+        return "bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100";
+      case "idle":
+      default:
+        return "bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100";
+    }
+  };
+
+  const areaKeyFor = (area: string): string => {
+    switch (area) {
+      case "Manitoba":
+        return "manitoba";
+      case "Edmonton":
+        return "edmonton";
+      case "Calgary":
+        return "calgary";
+      case "Other":
+        return "other";
+      default:
+        return "all";
+    }
+  };
+
   return (
     <div className="rounded-2xl bg-white shadow-sm ring-1 ring-gray-100 p-4 md:p-5">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
         <div className="flex items-center gap-2">
           <div className="p-1.5 rounded-lg bg-emerald-100 text-emerald-700">
             <Users className="w-3.5 h-3.5" />
           </div>
           <span className="text-sm font-semibold text-gray-800">Online now</span>
+          <span className="text-[11px] text-gray-400 hidden sm:inline">
+            · click an area badge to jump to that page
+          </span>
         </div>
         <Badge className="bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-50">
           {users.length} active
@@ -2220,12 +2498,16 @@ function OnlineUsersCard({
           {users.map((u) => {
             const RIcon = roleIcon(u.role);
             const isMe = u.id === currentUserId;
+            const info = userAreaMap[u.id];
+            const area = info?.area ?? "idle";
+            const storeName = info?.storeName ?? null;
+            const storeNumber = info?.storeNumber ?? null;
             return (
               <li
                 key={u.id}
-                className="flex items-center gap-2 rounded-md border border-gray-100 bg-gray-50/50 px-2.5 py-1.5"
+                className="flex items-center gap-2 rounded-md border border-gray-100 bg-gray-50/50 px-2.5 py-1.5 animate-area-page-in"
               >
-                <div className="relative">
+                <div className="relative shrink-0">
                   <div className="w-7 h-7 rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-[11px] font-bold uppercase">
                     {(u.fullName || u.username || "?").charAt(0)}
                   </div>
@@ -2240,17 +2522,40 @@ function OnlineUsersCard({
                       </span>
                     )}
                   </div>
-                  <div className="text-[11px] text-gray-500 truncate">
-                    @{u.username}
+                  <div className="text-[11px] text-gray-500 truncate flex items-center gap-1">
+                    <span>@{u.username}</span>
+                    {storeName && (
+                      <span className="text-gray-400 truncate" title={storeName ?? undefined}>
+                        · {storeNumber ? `#${storeNumber} ` : ""}{storeName}
+                      </span>
+                    )}
                   </div>
                 </div>
-                <Badge
-                  variant="outline"
-                  className={`shrink-0 text-[10.5px] ${roleBadgeClass(u.role)}`}
-                >
-                  <RIcon className="w-3 h-3 mr-1" />
-                  {roleLabel(u.role)}
-                </Badge>
+                <div className="flex flex-col items-end gap-1 shrink-0">
+                  <Badge
+                    variant="outline"
+                    className={`text-[10.5px] ${roleBadgeClass(u.role)}`}
+                  >
+                    <RIcon className="w-3 h-3 mr-1" />
+                    {roleLabel(u.role)}
+                  </Badge>
+                  {area !== "idle" ? (
+                    <button
+                      type="button"
+                      onClick={() => onSelectArea(areaKeyFor(area))}
+                      title={`Jump to ${area} page`}
+                      className={`inline-flex items-center gap-1 text-[10.5px] font-semibold rounded-full border px-1.5 py-0.5 transition-colors ${areaBadgeClass(area)}`}
+                    >
+                      <MapPin className="w-3 h-3" />
+                      {area === "multiple" ? "Multiple" : area}
+                    </button>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 text-[10.5px] font-medium rounded-full border px-1.5 py-0.5 bg-gray-50 text-gray-500 border-gray-200">
+                      <Clock className="w-3 h-3" />
+                      Idle
+                    </span>
+                  )}
+                </div>
               </li>
             );
           })}
@@ -2420,6 +2725,429 @@ function BulkOpCard({
         </a>
       </div>
     </div>
+  );
+}
+
+/* ============================================================ *
+ * AreaSidePanel — vertical sidebar listing the 3 area pages
+ * (Manitoba / Edmonton / Calgary) plus "Other" and "All".
+ * Each entry shows a colored status dot, the area name, a small
+ * "done/live/alert" chip, and the total store count.
+ * ============================================================ */
+const AREA_PAGE_META: Record<
+  string,
+  { label: string; tone: "emerald" | "sky" | "violet" | "gray" | "amber" }
+> = {
+  manitoba: { label: "Manitoba", tone: "emerald" },
+  edmonton: { label: "Edmonton", tone: "sky" },
+  calgary: { label: "Calgary", tone: "violet" },
+  other: { label: "Other areas", tone: "gray" },
+  all: { label: "All areas", tone: "amber" },
+};
+
+function AreaSidePanel({
+  selectedArea,
+  onSelect,
+  summaries,
+  currentUserArea,
+  variant = "desktop",
+  collapsed = false,
+  onToggleCollapse,
+}: {
+  selectedArea: string;
+  onSelect: (area: string) => void;
+  summaries: Record<string, { total: number; done: number; live: number; alert: number }>;
+  currentUserArea: string;
+  variant?: "desktop" | "mobile";
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
+}) {
+  // Header dot color per area tone
+  const toneDot: Record<string, string> = {
+    emerald: "bg-emerald-500",
+    sky: "bg-sky-500",
+    violet: "bg-violet-500",
+    gray: "bg-gray-400",
+    amber: "bg-amber-500",
+  };
+  const toneActive: Record<string, string> = {
+    emerald: "bg-emerald-50 border-emerald-200 text-emerald-700",
+    sky: "bg-sky-50 border-sky-200 text-sky-700",
+    violet: "bg-violet-50 border-violet-200 text-violet-700",
+    gray: "bg-gray-100 border-gray-200 text-gray-700",
+    amber: "bg-amber-50 border-amber-200 text-amber-700",
+  };
+  // Short label (1-3 chars) used when the sidebar is collapsed to icon mode.
+  const shortLabel: Record<string, string> = {
+    manitoba: "MB",
+    edmonton: "ED",
+    calgary: "CG",
+    other: "··",
+    all: "∞",
+  };
+
+  const areas = ["manitoba", "edmonton", "calgary", "other", "all"] as const;
+
+  if (variant === "mobile") {
+    // Horizontal pills — used in the mobile sticky bar.
+    return (
+      <>
+        {areas.map((a) => {
+          const meta = AREA_PAGE_META[a];
+          const sum = summaries[a];
+          const active = selectedArea === a;
+          const isMyArea =
+            currentUserArea === meta.label ||
+            (a === "all" && currentUserArea === "multiple");
+          return (
+            <button
+              key={a}
+              type="button"
+              onClick={() => onSelect(a)}
+              className={`inline-flex items-center gap-1.5 h-8 px-3 rounded-full border text-[12px] font-semibold shrink-0 transition-colors whitespace-nowrap ${
+                active
+                  ? `${toneActive[meta.tone]} ring-1 ring-offset-1 ring-current`
+                  : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full ${toneDot[meta.tone]}`} />
+              {meta.label}
+              <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold bg-white/70 text-current">
+                {sum.total}
+              </span>
+              {sum.alert > 0 && (
+                <span className="inline-flex items-center justify-center min-w-[16px] h-[16px] px-1 rounded-full text-[10px] font-bold bg-rose-100 text-rose-700 animate-pulse">
+                  {sum.alert}
+                </span>
+              )}
+              {isMyArea && (
+                <span
+                  className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-area-active-pulse"
+                  title="You are working here"
+                />
+              )}
+            </button>
+          );
+        })}
+      </>
+    );
+  }
+
+  // -------- COLLAPSED desktop sidebar (icon-only, narrow strip) --------
+  if (collapsed) {
+    return (
+      <div className="sticky top-[4.5rem] self-start">
+        <div className="rounded-2xl bg-white shadow-sm ring-1 ring-gray-100 overflow-hidden flex flex-col">
+          {/* Header — just the toggle button */}
+          <button
+            type="button"
+            onClick={() => onToggleCollapse?.()}
+            title="Expand sidebar"
+            className="px-2 py-2.5 border-b border-gray-100 bg-gradient-to-br from-emerald-50/60 to-white flex items-center justify-center hover:bg-emerald-50 transition-colors"
+          >
+            <div className="p-1.5 rounded-lg bg-emerald-100 text-emerald-700">
+              <MapPin className="w-3.5 h-3.5" />
+            </div>
+          </button>
+          <nav className="p-1 flex flex-col gap-0.5">
+            {areas.map((a) => {
+              const meta = AREA_PAGE_META[a];
+              const sum = summaries[a];
+              const active = selectedArea === a;
+              const isMyArea =
+                currentUserArea === meta.label ||
+                (a === "all" && currentUserArea === "multiple");
+              return (
+                <button
+                  key={a}
+                  type="button"
+                  onClick={() => onSelect(a)}
+                  title={`${meta.label} · ${sum.total} stores${sum.alert > 0 ? ` · ${sum.alert} alert` : ""}${isMyArea ? " · you are here" : ""}`}
+                  className={`relative flex items-center justify-center h-9 w-9 mx-auto rounded-lg text-[11px] font-bold transition-all ${
+                    active
+                      ? `${toneActive[meta.tone]} ring-1 ring-current`
+                      : "hover:bg-gray-50 text-gray-700"
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full absolute top-1 right-1 ${toneDot[meta.tone]}`}
+                  />
+                  {isMyArea && (
+                    <span
+                      className="w-1.5 h-1.5 rounded-full absolute bottom-1 right-1 bg-emerald-500 animate-area-active-pulse"
+                    />
+                  )}
+                  {shortLabel[a]}
+                  {sum.alert > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 inline-flex items-center justify-center min-w-[14px] h-[14px] px-0.5 rounded-full text-[9px] font-bold bg-rose-100 text-rose-700 animate-pulse">
+                      {sum.alert}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </nav>
+          <div className="px-1 py-1.5 border-t border-gray-100 bg-gray-50/40">
+            <button
+              type="button"
+              onClick={() => onToggleCollapse?.()}
+              title="Expand sidebar"
+              className="w-full h-7 inline-flex items-center justify-center rounded-md text-gray-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // -------- EXPANDED desktop sidebar --------
+  return (
+    <div className="sticky top-[4.5rem] self-start">
+      <div className="rounded-2xl bg-white shadow-sm ring-1 ring-gray-100 overflow-hidden">
+        <div className="px-3 py-3 border-b border-gray-100 bg-gradient-to-br from-emerald-50/60 to-white flex items-center justify-between gap-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="p-1.5 rounded-lg bg-emerald-100 text-emerald-700 shrink-0">
+              <MapPin className="w-3.5 h-3.5" />
+            </div>
+            <div className="flex flex-col leading-tight min-w-0">
+              <span className="text-[12.5px] font-bold text-gray-900 truncate">
+                Area pages
+              </span>
+              <span className="text-[10.5px] text-gray-500 truncate">
+                Pick a store area
+              </span>
+            </div>
+          </div>
+          {onToggleCollapse && (
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              title="Collapse sidebar"
+              className="shrink-0 w-7 h-7 inline-flex items-center justify-center rounded-md text-gray-400 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        <nav className="p-1.5 flex flex-col gap-0.5">
+          {areas.map((a) => {
+            const meta = AREA_PAGE_META[a];
+            const sum = summaries[a];
+            const active = selectedArea === a;
+            const isMyArea =
+              currentUserArea === meta.label ||
+              (a === "all" && currentUserArea === "multiple");
+            return (
+              <button
+                key={a}
+                type="button"
+                onClick={() => onSelect(a)}
+                className={`group relative flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-all ${
+                  active
+                    ? `${toneActive[meta.tone]} ring-1 ring-current`
+                    : "hover:bg-gray-50 text-gray-800"
+                }`}
+              >
+                <span
+                  className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                    toneDot[meta.tone]
+                  } ${active ? "" : "group-hover:scale-110 transition-transform"}`}
+                />
+                <span className="flex-1 min-w-0">
+                  <span className="flex items-center gap-1.5">
+                    <span className="text-[13px] font-semibold truncate">
+                      {meta.label}
+                    </span>
+                    {isMyArea && (
+                      <span
+                        className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-area-active-pulse shrink-0"
+                        title="You are working here"
+                      />
+                    )}
+                  </span>
+                  <span className="flex items-center gap-2 mt-0.5 text-[10.5px] text-gray-500">
+                    {sum.total === 0 ? (
+                      <span>no stores</span>
+                    ) : (
+                      <>
+                        <span className="text-emerald-600">{sum.done} done</span>
+                        {sum.live > 0 && (
+                          <span className="text-amber-600">{sum.live} live</span>
+                        )}
+                        {sum.alert > 0 && (
+                          <span className="text-rose-600 font-semibold">
+                            {sum.alert} alert
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </span>
+                </span>
+                <Badge
+                  className={`shrink-0 text-[10.5px] tabular-nums ${
+                    active
+                      ? "bg-white/60 text-current border-transparent"
+                      : "bg-gray-100 text-gray-700 border-gray-200 hover:bg-gray-100"
+                  }`}
+                >
+                  {sum.total}
+                </Badge>
+              </button>
+            );
+          })}
+        </nav>
+        <div className="px-3 py-2 border-t border-gray-100 bg-gray-50/40 text-[10.5px] text-gray-500 leading-relaxed">
+          Tip: clicking an online user's area badge also jumps to that page.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================ *
+ * AreaPage — renders the store list for the currently selected
+ * area as a single vertical scroll of rows. Uses the `animate-area-page-in`
+ * CSS class for the fade+slide transition on every area switch.
+ * ============================================================ */
+function AreaPage({
+  area,
+  stores,
+  summaries,
+  busyStoreId,
+  currentUserId,
+  isSA,
+  canDisableStores,
+  canEnableStores,
+  onPush,
+  onMarkDone,
+  onUndo,
+  onFlag,
+  onClearFlag,
+  onDisable,
+  onEnable,
+}: {
+  area: string;
+  stores: StoreRow[];
+  summaries: Record<string, { total: number; done: number; live: number; alert: number }>;
+  busyStoreId: string | null;
+  currentUserId: string;
+  isSA: boolean;
+  canDisableStores: boolean;
+  canEnableStores: boolean;
+  onPush: (store: StoreRow, type: string, status?: string, notes?: string) => void;
+  onMarkDone: (store: StoreRow, update: LatestUpdateLite) => void;
+  onUndo: (store: StoreRow, update: LatestUpdateLite) => void;
+  onFlag: (store: StoreRow) => void;
+  onClearFlag: (store: StoreRow) => void;
+  onDisable: (store: StoreRow) => void;
+  onEnable: (store: StoreRow) => void;
+}) {
+  const meta = AREA_PAGE_META[area] || AREA_PAGE_META.all;
+  const sum = summaries[area] || { total: 0, done: 0, live: 0, alert: 0 };
+
+  // Header status dot — green if all done, amber if any in-progress, red if any alert.
+  const headerDot =
+    sum.alert > 0
+      ? "bg-rose-500"
+      : sum.live > 0
+      ? "bg-amber-500"
+      : sum.total > 0 && sum.done === sum.total
+      ? "bg-emerald-500"
+      : "bg-gray-300";
+
+  // Tone class for the header strip (matches the side panel tone)
+  const toneHeader: Record<string, string> = {
+    emerald: "from-emerald-50 to-white text-emerald-700",
+    sky: "from-sky-50 to-white text-sky-700",
+    violet: "from-violet-50 to-white text-violet-700",
+    gray: "from-gray-50 to-white text-gray-700",
+    amber: "from-amber-50 to-white text-amber-700",
+  };
+
+  return (
+    <section
+      className="rounded-2xl bg-white shadow-sm ring-1 ring-gray-100 overflow-hidden animate-area-page-in"
+      aria-label={`${meta.label} page`}
+    >
+      {/* Page header */}
+      <div
+        className={`px-4 py-3 border-b border-gray-100 bg-gradient-to-br ${toneHeader[meta.tone]}`}
+      >
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className={`w-2.5 h-2.5 rounded-full ${headerDot}`} />
+            <h2 className="text-base font-bold truncate">{meta.label}</h2>
+            {sum.total > 0 && (
+              <Badge
+                className={`border-current/20 bg-white/60 text-current text-[11px]`}
+              >
+                {sum.total} stores
+              </Badge>
+            )}
+          </div>
+          {sum.total > 0 && (
+            <div className="flex items-center gap-3 text-[11px] font-medium">
+              <span className="inline-flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                {sum.done} done
+              </span>
+              {sum.live > 0 && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  {sum.live} live
+                </span>
+              )}
+              {sum.alert > 0 && (
+                <span className="inline-flex items-center gap-1 text-rose-700">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                  {sum.alert} alert
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+        {sum.total > 0 && (
+          <div className="mt-2 h-1.5 rounded-full bg-white/60 overflow-hidden">
+            <div
+              className="h-full bg-emerald-500 transition-all duration-500"
+              style={{ width: `${(sum.done / Math.max(sum.total, 1)) * 100}%` }}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Store rows — vertical scroll list */}
+      <div className="p-3 max-h-[calc(100vh-12rem)] overflow-y-auto custom-scroll">
+        {stores.length === 0 ? (
+          <p className="text-xs text-gray-400 text-center py-8">
+            No stores in this area.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {stores.map((s) => (
+              <StoreCard
+                key={s.id}
+                store={s}
+                busy={busyStoreId === s.id}
+                currentUserId={currentUserId}
+                isSA={isSA}
+                canDisableStores={canDisableStores}
+                canEnableStores={canEnableStores}
+                onPush={onPush}
+                onMarkDone={onMarkDone}
+                onUndo={onUndo}
+                onFlag={onFlag}
+                onClearFlag={onClearFlag}
+                onDisable={onDisable}
+                onEnable={onEnable}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -2643,17 +3371,20 @@ function StoreCard({
           : "ring-gray-200"
       } shadow-sm overflow-hidden transition-all duration-300`}
     >
-      {/* Top: store-number blue box + ID#/hash */}
-      <div className="flex items-stretch">
-        {/* Blue store-number box */}
-        <div className="bg-blue-600 text-white px-3 py-2.5 flex flex-col justify-center min-w-[88px]">
+      {/* ============== MAIN ROW ==============
+          Single horizontal row: blue store-number box (left) + info
+          (middle, flex-1) + CFC/AOO buttons (right, fixed width on md+).
+          On small screens the actions wrap below the info area. */}
+      <div className="flex flex-col md:flex-row md:items-stretch">
+        {/* Blue store-number box (slim vertical banner on the left) */}
+        <div className="bg-blue-600 text-white px-3 py-2 flex flex-row md:flex-col md:justify-center md:min-w-[88px] md:gap-0.5 items-baseline md:items-start gap-2 shrink-0">
           <div className="text-[10px] uppercase tracking-wide text-blue-100/90 font-semibold">
             Store No.
           </div>
           <div className="text-sm font-bold leading-tight">
             {store.storeNumber || "—"}
           </div>
-          <div className="text-[10.5px] mt-1 text-blue-100/90">
+          <div className="text-[10.5px] text-blue-100/90">
             {store.region}
             {store.brand && (
               <span className="ml-1 px-1 py-0 rounded bg-white/15 font-semibold">
@@ -2663,52 +3394,78 @@ function StoreCard({
           </div>
         </div>
 
-        {/* ID# + hash + name + address */}
-<div className="flex-1 px-3 py-2.5 min-w-0">
-  {/* Upper row: ID# (kaliwa) + HashCode (kanan) — kasinglaki ng ID# */}
-  <div className="flex items-center justify-between gap-1.5">
-    {/* LEFT: ID# (original — huwag galawin) */}
-    <span className="text-emerald-700 font-bold text-sm tabular-nums">
-      ID# {store.storeId}
-    </span>
+        {/* MIDDLE: store info — flex-1, min-w-0 so it shrinks properly */}
+        <div className="flex-1 px-3 py-2 min-w-0 flex flex-col gap-1">
+          {/* Upper row: ID# (left) + HashCode (right) */}
+          <div className="flex items-center justify-between gap-1.5">
+            <span className="text-emerald-700 font-bold text-sm tabular-nums">
+              ID# {store.storeId}
+            </span>
+            <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-sm font-bold text-amber-800">
+              <span>HashCode:</span>
+              <span className="font-mono">{store.hashCode}</span>
+            </span>
+          </div>
 
-    {/* RIGHT: HashCode — same size as ID# (text-sm), original amber styling */}
-    <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 border border-amber-200 px-1.5 py-0.5 text-sm font-bold text-amber-800">
-      <span>HashCode:</span>
-      <span className="font-mono">{store.hashCode}</span>
-    </span>
-  </div>
-
-  <div className="text-[13px] font-semibold text-gray-900 mt-0.5 truncate">
-    {store.name}
-  </div>
-  {store.address && (
-    <div className="flex items-start gap-1 text-[11.5px] text-gray-500 mt-0.5">
-      <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-gray-400" />
-      <span className="truncate">{store.address}</span>
-    </div>
-  )}
-</div>
-      </div>
-
-      {/* Lock / active-status indicator */}
-      {(lockedByMe || lockedByOther || activeStatus) && (
-        <div className="px-3 pb-2 space-y-1.5">
-          {lockedByMe && (
-            <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-2 py-1">
-              <Lock className="w-3 h-3" />
-              You are working on this store
+          {/* Store name + address */}
+          <div className="text-[13px] font-semibold text-gray-900 truncate">
+            {store.name}
+          </div>
+          {store.address && (
+            <div className="flex items-start gap-1 text-[11.5px] text-gray-500">
+              <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-gray-400" />
+              <span className="truncate">{store.address}</span>
             </div>
           )}
-          {lockedByOther && store.lockedBy && (
-            <div className="flex items-center gap-1.5 text-[11.5px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-2 py-1">
-              <Lock className="w-3 h-3" />
-              Locked by {store.lockedBy.fullName || store.lockedBy.username}
-            </div>
-          )}
+
+          {/* Status badge + operation hours + lock indicator (compact inline) */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {effectiveStatus ? (
+              <Badge
+                variant="outline"
+                className={`gap-1 ${toneFor(effectiveStatus).badge}`}
+              >
+                <StatusBadgeIcon
+                  status={effectiveStatus}
+                  className="w-3 h-3"
+                />
+                {statusLabel(effectiveStatus)}
+              </Badge>
+            ) : (
+              <Badge
+                variant="outline"
+                className="gap-1 bg-gray-50 text-gray-500 border-gray-200"
+              >
+                <Clock className="w-3 h-3" />
+                Awaiting start
+              </Badge>
+            )}
+            {store.operationHours && (
+              <span
+                className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10.5px] font-medium ${hoursClass}`}
+              >
+                <Clock className="w-3 h-3" />
+                {store.operationHours}
+              </span>
+            )}
+            {lockedByMe && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-1.5 py-0.5">
+                <Lock className="w-3 h-3" />
+                You
+              </span>
+            )}
+            {lockedByOther && store.lockedBy && (
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-1.5 py-0.5">
+                <Lock className="w-3 h-3" />
+                {store.lockedBy.fullName || store.lockedBy.username}
+              </span>
+            )}
+          </div>
+
+          {/* Active status banner (compact, full-width inside the middle column) */}
           {activeStatus && (
             <div
-              className={`flex items-start gap-1.5 text-[11.5px] font-semibold rounded-md px-2 py-1 ${
+              className={`flex items-start gap-1.5 text-[11px] font-semibold rounded-md px-2 py-1 ${
                 activeStatus.status === "other-issues"
                   ? "bg-amber-50 border border-amber-200 text-amber-800"
                   : "bg-rose-50 border border-rose-200 text-rose-800"
@@ -2729,198 +3486,167 @@ function StoreCard({
               </span>
             </div>
           )}
-        </div>
-      )}
 
-      {/* Disabled banner */}
-      {store.disabled && (
-        <div className="mx-3 mb-2 rounded-md bg-gray-100 border border-gray-200 px-2 py-1.5 text-[11.5px] text-gray-700">
-          <div className="flex items-center gap-1.5 font-semibold">
-            <PowerOff className="w-3 h-3" />
-            Disabled
-          </div>
-          {store.disabledReason && (
-            <div className="text-[11px] text-gray-600 mt-0.5">
-              {store.disabledReason}
+          {/* Disabled banner */}
+          {store.disabled && (
+            <div className="rounded-md bg-gray-100 border border-gray-200 px-2 py-1.5 text-[11.5px] text-gray-700">
+              <div className="flex items-center gap-1.5 font-semibold">
+                <PowerOff className="w-3 h-3" />
+                Disabled
+              </div>
+              {store.disabledReason && (
+                <div className="text-[11px] text-gray-600 mt-0.5">
+                  {store.disabledReason}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Latest update info (compact) */}
+          {latest && !activeStatus && (
+            <div className="rounded-md bg-gray-50 border border-gray-100 px-2 py-1 text-[11px] text-gray-600">
+              <div className="flex items-center gap-1.5 font-semibold text-gray-700">
+                {updateTypeMeta(latest.type)?.label || latest.type}
+                <span className="font-normal">·</span>
+                <span>{statusLabel(latest.status)}</span>
+                <span className="font-normal text-gray-400">·</span>
+                <span className="font-normal">
+                  {latest.fullName || latest.username} · {timeAgo(latest.startedAt)}
+                </span>
+              </div>
+              {latest.notes && (
+                <div className="mt-0.5 text-gray-500 line-clamp-1">{latest.notes}</div>
+              )}
+            </div>
+          )}
+
+          {/* CFC & AOO execution logs (compact inline) */}
+          {(cfc || aoo) && (
+            <div className="rounded-md bg-gray-50 border border-gray-100 px-2 py-1 text-[11px] text-gray-600 flex flex-wrap gap-x-3 gap-y-0.5">
+              {cfc && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="font-semibold text-emerald-700">CFC:</span>
+                  <span className="truncate">
+                    {cfc.fullName || cfc.username} · {timeAgo(cfc.startedAt)}
+                  </span>
+                </span>
+              )}
+              {aoo && (
+                <span className="inline-flex items-center gap-1">
+                  <span className="font-semibold text-amber-700">AOO:</span>
+                  <span className="truncate">
+                    {aoo.fullName || aoo.username} · {timeAgo(aoo.startedAt)}
+                  </span>
+                </span>
+              )}
             </div>
           )}
         </div>
-      )}
 
-      {/* Status + operation hours */}
-      <div className="px-3 pb-2 flex items-center justify-between gap-2 flex-wrap">
-        {effectiveStatus ? (
-          <Badge
-            variant="outline"
-            className={`gap-1 ${toneFor(effectiveStatus).badge}`}
-          >
-            <StatusBadgeIcon
-              status={effectiveStatus}
-              className="w-3 h-3"
-            />
-            {statusLabel(effectiveStatus)}
-          </Badge>
-        ) : (
-          <Badge
-            variant="outline"
-            className="gap-1 bg-gray-50 text-gray-500 border-gray-200"
-          >
-            <Clock className="w-3 h-3" />
-            Awaiting start
-          </Badge>
-        )}
-        {store.operationHours && (
-          <span
-            className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10.5px] font-medium ${hoursClass}`}
-          >
-            <Clock className="w-3 h-3" />
-            {store.operationHours}
-          </span>
-        )}
-      </div>
-
-      {/* Latest update info */}
-      {latest && !activeStatus && (
-        <div className="mx-3 mb-2 rounded-md bg-gray-50 border border-gray-100 px-2.5 py-1.5 text-[11px] text-gray-600">
-          <div className="flex items-center gap-1.5 font-semibold text-gray-700">
-            {updateTypeMeta(latest.type)?.label || latest.type}
-            <span className="font-normal">·</span>
-            <span>{statusLabel(latest.status)}</span>
-          </div>
-          <div className="mt-0.5">
-            by {latest.fullName || latest.username} · {timeAgo(latest.startedAt)}
-          </div>
-          {latest.notes && (
-            <div className="mt-0.5 text-gray-500 line-clamp-2">{latest.notes}</div>
-          )}
-        </div>
-      )}
-
-      {/* --- NEW: CFC & AOO Execution Logs --- */}
-      {(cfc || aoo) && (
-        <div className="mx-3 mb-2 rounded-md bg-gray-50 border border-gray-100 px-2.5 py-1.5 text-[11px] text-gray-600 space-y-1">
-          {cfc && (
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-semibold text-emerald-700">CFC Refresh:</span>
-              <span className="text-right truncate">
-                {cfc.fullName || cfc.username} · {timeAgo(cfc.startedAt)}
-              </span>
+        {/* ============== RIGHT: ACTION BUTTONS ==============
+            On md+ this sits on the right end of the row (fixed width);
+            on small screens it stacks below the info as a full-width row. */}
+        <div className="md:border-l md:border-gray-100 md:bg-gray-50/40 px-3 py-2 flex flex-col gap-1.5 md:w-[140px] md:shrink-0 md:justify-center">
+          {/* CFC + AOO buttons (always 2-col grid) */}
+          {!store.disabled ? (
+            <div className="grid grid-cols-2 gap-1.5">
+              <UpdateActionButton
+                label="CFC"
+                sub={cfcCompleted ? "Done" : cfc ? statusLabel(cfc.status) : "Push"}
+                color="emerald"
+                disabled={cfcLocked}
+                inProgress={cfc?.status === "in-progress"}
+                done={cfcCompleted}
+                onClick={() =>
+                  cfc?.status === "in-progress"
+                    ? onMarkDone(store, cfc)
+                    : onPush(store, "cfc-refresh")
+                }
+                busy={busy}
+              />
+              <UpdateActionButton
+                label="AOO"
+                sub={
+                  aooCompleted
+                    ? "Done"
+                    : !store.cfcDone
+                    ? "Locked"
+                    : aoo
+                    ? statusLabel(aoo.status)
+                    : "Push"
+                }
+                color="amber"
+                disabled={aooLocked}
+                inProgress={aoo?.status === "in-progress"}
+                done={aooCompleted}
+                onClick={() =>
+                  aoo?.status === "in-progress"
+                    ? onMarkDone(store, aoo)
+                    : onPush(store, "aoo-manual-import")
+                }
+                busy={busy}
+              />
             </div>
-          )}
-          {aoo && (
-            <div className="flex items-center justify-between gap-2">
-              <span className="font-semibold text-amber-700">AOO Import:</span>
-              <span className="text-right truncate">
-                {aoo.fullName || aoo.username} · {timeAgo(aoo.startedAt)}
-              </span>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Per-store action buttons: CFC + AOO (when not disabled) */}
-      {!store.disabled && (
-        <div className="px-3 pb-2 grid grid-cols-2 gap-1.5">
-          <UpdateActionButton
-            label="CFC"
-            sub={cfcCompleted ? "Completed" : cfc ? statusLabel(cfc.status) : "Push"}
-            color="emerald"
-            disabled={cfcLocked}
-            inProgress={cfc?.status === "in-progress"}
-            done={cfcCompleted}
-            onClick={() =>
-              cfc?.status === "in-progress"
-                ? onMarkDone(store, cfc)
-                : onPush(store, "cfc-refresh")
-            }
-            busy={busy}
-          />
-          <UpdateActionButton
-            label="AOO"
-            sub={
-              aooCompleted
-                ? "Completed"
-                : !store.cfcDone
-                ? "Locked"
-                : aoo
-                ? statusLabel(aoo.status)
-                : "Push"
-            }
-            color="amber"
-            disabled={aooLocked}
-            inProgress={aoo?.status === "in-progress"}
-            done={aooCompleted}
-            onClick={() =>
-              aoo?.status === "in-progress"
-                ? onMarkDone(store, aoo)
-                : onPush(store, "aoo-manual-import")
-            }
-            busy={busy}
-          />
-        </div>
-      )}
-
-      {/* 1. Kapag naka-DISABLE ang store, ipapakita lang ang ENABLE button (para SA/Admin) */}
-      {store.disabled && canEnableStores && (
-        <div className="px-3 pb-3 flex items-center justify-end">
-          <button
-            onClick={() => onEnable(store)}
-            disabled={busy}
-            className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11.5px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed ml-auto"
-          >
-            <Power className="w-3 h-3" />
-            Enable
-          </button>
-        </div>
-      )}
-
-      {/* 2. Kapag ACTIVE ang store, ipapakita ang Flag issue at Disable buttons */}
-      {!store.disabled && !allButtonsLocked && (
-        <div className="px-3 pb-3 flex items-center gap-1.5 flex-wrap">
-          {activeStatus ? (
-            <button
-              onClick={() => onClearFlag(store)}
-              disabled={busy || !store.canFlag || lockedByOther}
-              className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11.5px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              <CheckCircle2 className="w-3 h-3" />
-              Clear
-            </button>
           ) : (
-            !store.disabled && !lockedByOther && (
+            /* When disabled, only show Enable button (SA/Admin) */
+            canEnableStores && (
               <button
-                onClick={() => onFlag(store)}
-                disabled={busy || !store.canFlag}
-                className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11.5px] font-medium text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                onClick={() => onEnable(store)}
+                disabled={busy}
+                className="inline-flex items-center justify-center gap-1 h-8 px-2 rounded-md text-[11.5px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed w-full"
               >
-                <Flag className="w-3 h-3" />
-                Flag issue
+                <Power className="w-3 h-3" />
+                Enable
               </button>
             )
           )}
 
-          {canDisableStores && !store.disabled && (
-            <button
-              onClick={() => onDisable(store)}
-              disabled={busy}
-              className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11.5px] font-medium text-gray-600 bg-gray-50 border border-gray-200 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed ml-auto"
-            >
-              <PowerOff className="w-3 h-3" />
-              Disable
-            </button>
+          {/* Secondary action row: Flag / Disable */}
+          {!store.disabled && !allButtonsLocked && (
+            <div className="flex items-center gap-1">
+              {activeStatus ? (
+                <button
+                  onClick={() => onClearFlag(store)}
+                  disabled={busy || !store.canFlag || lockedByOther}
+                  className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11px] font-medium text-emerald-700 bg-emerald-50 border border-emerald-200 hover:bg-emerald-100 disabled:opacity-50 disabled:cursor-not-allowed flex-1 justify-center"
+                >
+                  <CheckCircle2 className="w-3 h-3" />
+                  Clear
+                </button>
+              ) : (
+                !lockedByOther && (
+                  <button
+                    onClick={() => onFlag(store)}
+                    disabled={busy || !store.canFlag}
+                    className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11px] font-medium text-rose-700 bg-rose-50 border border-rose-200 hover:bg-rose-100 disabled:opacity-50 disabled:cursor-not-allowed flex-1 justify-center"
+                  >
+                    <Flag className="w-3 h-3" />
+                    Flag
+                  </button>
+                )
+              )}
+              {canDisableStores && (
+                <button
+                  onClick={() => onDisable(store)}
+                  disabled={busy}
+                  className="inline-flex items-center gap-1 h-7 px-2 rounded-md text-[11px] font-medium text-gray-600 bg-gray-50 border border-gray-200 hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                  title="Disable store"
+                >
+                  <PowerOff className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* "All done" badge replaces action row when both completed */}
+          {allButtonsLocked && !store.disabled && (
+            <div className="rounded-md bg-emerald-50 border border-emerald-200 px-2 py-1.5 flex items-center gap-1 text-[11px] text-emerald-700 font-semibold justify-center">
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              Completed
+            </div>
           )}
         </div>
-      )}
-      
-      {/* When both CFC + AOO are completed, show a "Completed" banner instead of buttons */}
-      {allButtonsLocked && !store.disabled && (
-        <div className="px-3 pb-3">
-          <div className="rounded-md bg-emerald-50 border border-emerald-200 px-3 py-2 flex items-center gap-1.5 text-[12px] text-emerald-700 font-semibold">
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            Store fully completed — use Reset to start a new cycle.
-          </div>
-        </div>
-      )}
+      </div>
     </div>
   );
 }
