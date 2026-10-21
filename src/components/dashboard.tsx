@@ -396,7 +396,6 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
         saved === "manitoba" ||
         saved === "edmonton" ||
         saved === "calgary" ||
-        saved === "other" ||
         saved === "all"
       ) {
         return saved;
@@ -1700,10 +1699,14 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
           {/* GIF + Attribution (right, 1 col) */}
           <div className="lg:col-span-1 flex flex-col gap-2">
             <div
-              className="relative rounded-2xl overflow-hidden ring-1 ring-emerald-100 shadow-sm h-32 sm:h-36 lg:h-40 bg-emerald-50"
+              // Use aspect-[4/3] instead of fixed height — the whole GIF will
+              // always fit because the container grows with its width. The
+              // previous fixed-height + `background-size: cover` was clipping
+              // the GIF vertically when its natural aspect ratio was wider.
+              className="relative rounded-2xl overflow-hidden ring-1 ring-emerald-100 shadow-sm bg-emerald-50 aspect-[4/3] w-full"
               style={{
                 backgroundImage: "url('/store-monitor.gif')",
-                backgroundSize: "cover",
+                backgroundSize: "contain",
                 backgroundPosition: "center",
                 backgroundRepeat: "no-repeat",
               }}
@@ -2741,7 +2744,8 @@ const AREA_PAGE_META: Record<
   manitoba: { label: "Manitoba", tone: "emerald" },
   edmonton: { label: "Edmonton", tone: "sky" },
   calgary: { label: "Calgary", tone: "violet" },
-  other: { label: "Other areas", tone: "gray" },
+  // Note: "Other" was removed from the sidebar by user request — there are no
+  // stores in this category. The "all" option still shows every store.
   all: { label: "All areas", tone: "amber" },
 };
 
@@ -2786,7 +2790,8 @@ function AreaSidePanel({
     all: "∞",
   };
 
-  const areas = ["manitoba", "edmonton", "calgary", "other", "all"] as const;
+  // Only 3 areas + "All" — "Other" was removed by user request (no stores).
+  const areas = ["manitoba", "edmonton", "calgary", "all"] as const;
 
   if (variant === "mobile") {
     // Horizontal pills — used in the mobile sticky bar.
