@@ -829,10 +829,14 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
     });
   }
 
+  // Single-press execution: when the user presses CFC Push / AOO once,
+  // the update is created directly with status="completed" and the button
+  // immediately locks + shows "Executed". There is no more "in-progress"
+  // intermediate state for these two buttons.
   async function pushStoreUpdate(
     store: StoreRow,
     type: string,
-    status: string = "in-progress",
+    status: string = "completed",
     notes?: string
   ) {
     setBusyStoreId(store.id);
@@ -3401,8 +3405,9 @@ function StoreCard({
 
         {/* MIDDLE: store info — flex-1, min-w-0 so it shrinks properly */}
         <div className="flex-1 px-3 py-2 min-w-0 flex flex-col gap-1">
-          {/* Upper row: ID# (left) + HashCode (right) */}
-          <div className="flex items-center justify-between gap-1.5">
+          {/* Upper row: ID# (left) + HashCode (slightly inward from right edge,
+              with breathing room before the action button column) */}
+          <div className="flex items-center justify-between gap-1.5 pr-3">
             <span className="text-emerald-700 font-bold text-sm tabular-nums">
               ID# {store.storeId}
             </span>
@@ -3551,44 +3556,36 @@ function StoreCard({
         {/* ============== RIGHT: ACTION BUTTONS ==============
             On md+ this sits on the right end of the row (fixed width);
             on small screens it stacks below the info as a full-width row. */}
-        <div className="md:border-l md:border-gray-100 md:bg-gray-50/40 px-3 py-2 flex flex-col gap-1.5 md:w-[140px] md:shrink-0 md:justify-center">
-          {/* CFC + AOO buttons (always 2-col grid) */}
+        {/* Wider action column (200px) so the CFC/AOO labels fit without
+            being clipped or wrapped awkwardly. */}
+        <div className="md:border-l md:border-gray-100 md:bg-gray-50/40 px-3 py-2 flex flex-col gap-1.5 md:w-[200px] md:shrink-0 md:justify-center">
+          {/* CFC + AOO buttons (always 2-col grid).
+              Single-press execution: one click → status="completed" → button
+              locks and shows "Executed". No more "in-progress" step. */}
           {!store.disabled ? (
             <div className="grid grid-cols-2 gap-1.5">
               <UpdateActionButton
                 label="CFC"
-                sub={cfcCompleted ? "Done" : cfc ? statusLabel(cfc.status) : "Push"}
+                sub={cfcCompleted ? "Executed" : "Push"}
                 color="emerald"
                 disabled={cfcLocked}
-                inProgress={cfc?.status === "in-progress"}
                 done={cfcCompleted}
-                onClick={() =>
-                  cfc?.status === "in-progress"
-                    ? onMarkDone(store, cfc)
-                    : onPush(store, "cfc-refresh")
-                }
+                onClick={() => onPush(store, "cfc-refresh")}
                 busy={busy}
               />
               <UpdateActionButton
                 label="AOO"
                 sub={
                   aooCompleted
-                    ? "Done"
+                    ? "Executed"
                     : !store.cfcDone
                     ? "Locked"
-                    : aoo
-                    ? statusLabel(aoo.status)
                     : "Push"
                 }
                 color="amber"
                 disabled={aooLocked}
-                inProgress={aoo?.status === "in-progress"}
                 done={aooCompleted}
-                onClick={() =>
-                  aoo?.status === "in-progress"
-                    ? onMarkDone(store, aoo)
-                    : onPush(store, "aoo-manual-import")
-                }
+                onClick={() => onPush(store, "aoo-manual-import")}
                 busy={busy}
               />
             </div>
@@ -3661,7 +3658,6 @@ function UpdateActionButton({
   sub,
   color,
   disabled,
-  inProgress,
   done,
   onClick,
   busy,
@@ -3670,21 +3666,21 @@ function UpdateActionButton({
   sub: string;
   color: "emerald" | "amber";
   disabled: boolean;
-  inProgress: boolean;
   done: boolean;
   onClick: () => void;
   busy: boolean;
 }) {
+  // Vertical stack layout: icon + label on top, sub-label below.
+  // This way longer sub-labels like "Executed" fit comfortably inside the
+  // button without being clipped, while keeping the column at 200px.
   const base =
-    "h-9 rounded-md text-[12.5px] font-semibold inline-flex items-center justify-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed";
+    "h-12 rounded-md inline-flex flex-col items-center justify-center gap-0.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed px-1";
+  // Only two visual states now: "done" (locked, shows Executed) or
+  // "ready/locked" (Push or Locked). No more "in-progress" branch.
   const cls = done
     ? color === "emerald"
       ? "bg-emerald-100 text-emerald-800 border border-emerald-200 cursor-not-allowed"
       : "bg-amber-100 text-amber-800 border border-amber-200 cursor-not-allowed"
-    : inProgress
-    ? color === "emerald"
-      ? "bg-emerald-600 text-white border border-emerald-600 hover:bg-emerald-700"
-      : "bg-amber-600 text-white border border-amber-600 hover:bg-amber-700"
     : disabled
     ? "bg-gray-50 text-gray-400 border border-gray-200"
     : color === "emerald"
@@ -3700,13 +3696,11 @@ function UpdateActionButton({
         <span className="h-3 w-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
       ) : done ? (
         <CheckCircle2 className="w-3.5 h-3.5" />
-      ) : inProgress ? (
-        <CheckCircle2 className="w-3.5 h-3.5" />
       ) : (
         <Plus className="w-3.5 h-3.5" />
       )}
-      <span>{label}</span>
-      <span className="text-[10.5px] opacity-80 font-normal">{sub}</span>
+      <span className="text-[12px] font-semibold leading-none">{label}</span>
+      <span className="text-[10px] opacity-80 font-normal leading-none">{sub}</span>
     </button>
   );
 }
