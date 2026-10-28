@@ -780,7 +780,8 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
         (s.region || "").toLowerCase().includes(q) ||
         (s.area || "").toLowerCase().includes(q) ||
         (s.address || "").toLowerCase().includes(q) ||
-        (s.brand || "").toLowerCase().includes(q)
+        (s.brand || "").toLowerCase().includes(q) ||
+        (s.operationHours || "").toLowerCase().includes(q)
       );
     });
   }, [selectedArea, storesByArea, stores, search]);
@@ -829,14 +830,14 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
     });
   }
 
-  // Single-press execution: when the user presses CFC Push / AOO once,
-  // the update is created directly with status="completed" and the button
-  // immediately locks + shows "Executed". There is no more "in-progress"
-  // intermediate state for these two buttons.
+  // Single-press locks the button visually, but the underlying update is
+  // created with status="in-progress" so the user's online status reflects
+  // "working on this store". The user can press the locked button again to
+  // mark the update as completed → status returns to IDLE.
   async function pushStoreUpdate(
     store: StoreRow,
     type: string,
-    status: string = "completed",
+    status: string = "in-progress",
     notes?: string
   ) {
     setBusyStoreId(store.id);
@@ -1997,7 +1998,7 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
             <div className="relative flex-1">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
               <Input
-                placeholder="Search within this area: ID#, hashcode, store, address, brand…"
+                placeholder="Search within this area: ID#, hashcode, store, address, brand, operation hours…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 className="h-9 pl-8 bg-gray-50 border-gray-200 text-sm"
@@ -3560,32 +3561,50 @@ function StoreCard({
             being clipped or wrapped awkwardly. */}
         <div className="md:border-l md:border-gray-100 md:bg-gray-50/40 px-3 py-2 flex flex-col gap-1.5 md:w-[200px] md:shrink-0 md:justify-center">
           {/* CFC + AOO buttons (always 2-col grid).
-              Single-press execution: one click → status="completed" → button
-              locks and shows "Executed". No more "in-progress" step. */}
+              Click flow:
+                1. Push    -> creates in-progress update + button locks (shows "Executed")
+                                + user status reflects "working on this store"
+                2. Executed -> marks update as completed + user status returns to IDLE
+                                + button becomes fully locked (shows "Done")
+              The button is visually "locked" after the first press (per user
+              request: no "In Progress" label ever shown) but remains clickable
+              to allow completion. */}
           {!store.disabled ? (
             <div className="grid grid-cols-2 gap-1.5">
               <UpdateActionButton
                 label="CFC"
-                sub={cfcCompleted ? "Executed" : "Push"}
+                sub={cfcCompleted ? "Done" : cfc?.status === "in-progress" ? "Executed" : "Push"}
                 color="emerald"
                 disabled={cfcLocked}
+                executing={cfc?.status === "in-progress"}
                 done={cfcCompleted}
-                onClick={() => onPush(store, "cfc-refresh")}
+                onClick={() =>
+                  cfc?.status === "in-progress"
+                    ? onMarkDone(store, cfc)
+                    : onPush(store, "cfc-refresh")
+                }
                 busy={busy}
               />
               <UpdateActionButton
                 label="AOO"
                 sub={
                   aooCompleted
-                    ? "Executed"
+                    ? "Done"
                     : !store.cfcDone
                     ? "Locked"
+                    : aoo?.status === "in-progress"
+                    ? "Executed"
                     : "Push"
                 }
                 color="amber"
                 disabled={aooLocked}
+                executing={aoo?.status === "in-progress"}
                 done={aooCompleted}
-                onClick={() => onPush(store, "aoo-manual-import")}
+                onClick={() =>
+                  aoo?.status === "in-progress"
+                    ? onMarkDone(store, aoo)
+                    : onPush(store, "aoo-manual-import")
+                }
                 busy={busy}
               />
             </div>
@@ -3658,6 +3677,7 @@ function UpdateActionButton({
   sub,
   color,
   disabled,
+  executing,
   done,
   onClick,
   busy,
@@ -3666,21 +3686,28 @@ function UpdateActionButton({
   sub: string;
   color: "emerald" | "amber";
   disabled: boolean;
+  executing: boolean;
   done: boolean;
   onClick: () => void;
   busy: boolean;
 }) {
   // Vertical stack layout: icon + label on top, sub-label below.
-  // This way longer sub-labels like "Executed" fit comfortably inside the
-  // button without being clipped, while keeping the column at 200px.
+  // Three visual states:
+  //   1. done (completed)         → pastel bg, fully locked, NOT clickable
+  //   2. executing (in-progress)  → solid bg, visually "locked" but CLICKABLE
+  //                                  to mark as completed (returns user to IDLE)
+  //   3. ready                    → outlined bg, clickable to push
+  //   4. disabled (locked)        → gray, not clickable
   const base =
     "h-12 rounded-md inline-flex flex-col items-center justify-center gap-0.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed px-1";
-  // Only two visual states now: "done" (locked, shows Executed) or
-  // "ready/locked" (Push or Locked). No more "in-progress" branch.
   const cls = done
     ? color === "emerald"
       ? "bg-emerald-100 text-emerald-800 border border-emerald-200 cursor-not-allowed"
       : "bg-amber-100 text-amber-800 border border-amber-200 cursor-not-allowed"
+    : executing
+    ? color === "emerald"
+      ? "bg-emerald-600 text-white border border-emerald-600 hover:bg-emerald-700"
+      : "bg-amber-600 text-white border border-amber-600 hover:bg-amber-700"
     : disabled
     ? "bg-gray-50 text-gray-400 border border-gray-200"
     : color === "emerald"
@@ -3695,6 +3722,8 @@ function UpdateActionButton({
       {busy ? (
         <span className="h-3 w-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
       ) : done ? (
+        <CheckCircle2 className="w-3.5 h-3.5" />
+      ) : executing ? (
         <CheckCircle2 className="w-3.5 h-3.5" />
       ) : (
         <Plus className="w-3.5 h-3.5" />
