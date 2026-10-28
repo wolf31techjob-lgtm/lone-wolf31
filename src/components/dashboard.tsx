@@ -542,6 +542,7 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
   // share state between the two fetches.
   const {
     data: allStoresData,
+    refresh: refreshAllStores,
   } = useAuthedFetch<StoresData>("/api/stores?all=1", token, { intervalMs: 10000 });
 
   const allActiveStores = useMemo(
@@ -708,7 +709,17 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
         ] as const;
         for (const t of types) {
           const upd = s.latestByType[t];
-          if (upd && upd.status === "in-progress" && upd.userId === u.id) {
+          if (!upd || upd.userId !== u.id) continue;
+          // For CFC + AOO: the button shows "Executed" immediately (status is
+          // "completed" at push time), but the user is still considered
+          // "working on this store" until BOTH CFC + AOO are done (bothDone).
+          // For menu-pull / deliverect: keep the original in-progress check
+          // (these are bulk operations with a real in-progress → completed flow).
+          const isWorking =
+            t === "cfc-refresh" || t === "aoo-manual-import"
+              ? !s.bothDone
+              : upd.status === "in-progress";
+          if (isWorking) {
             const areaKey = (s.area || s.region || "").trim().toLowerCase();
             const normalized =
               areaKey === "manitoba"
@@ -830,14 +841,17 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
     });
   }
 
-  // Single-press locks the button visually, but the underlying update is
-  // created with status="in-progress" so the user's online status reflects
-  // "working on this store". The user can press the locked button again to
-  // mark the update as completed → status returns to IDLE.
+  // Single-press execution: when the user presses CFC Push / AOO once, the
+  // update is created directly with status="completed" so the button
+  // immediately locks + shows "Executed". There is no "in-progress" label
+  // on the button. However, the user's online status still reflects
+  // "working on this store" because userAreaMap detects any update by the
+  // user on a store that is not yet bothDone. The user becomes IDLE only
+  // when BOTH CFC + AOO are completed (bothDone = true).
   async function pushStoreUpdate(
     store: StoreRow,
     type: string,
-    status: string = "in-progress",
+    status: string = "completed",
     notes?: string
   ) {
     setBusyStoreId(store.id);
@@ -867,7 +881,12 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
           title: `${updateTypeMeta(type)?.label} pushed`,
           description: `${store.name} → ${statusLabel(status)}.`,
         });
+        // Refresh stores + online users + all-stores immediately so the
+        // OnlineUsersCard re-renders right away to show "Working on store X"
+        // instead of waiting for the next 10s polling cycle.
         refreshStores();
+        refreshAllStores();
+        refreshOnline();
       }
     } catch (e) {
       toast({
@@ -3561,50 +3580,37 @@ function StoreCard({
             being clipped or wrapped awkwardly. */}
         <div className="md:border-l md:border-gray-100 md:bg-gray-50/40 px-3 py-2 flex flex-col gap-1.5 md:w-[200px] md:shrink-0 md:justify-center">
           {/* CFC + AOO buttons (always 2-col grid).
-              Click flow:
-                1. Push    -> creates in-progress update + button locks (shows "Executed")
-                                + user status reflects "working on this store"
-                2. Executed -> marks update as completed + user status returns to IDLE
-                                + button becomes fully locked (shows "Done")
-              The button is visually "locked" after the first press (per user
-              request: no "In Progress" label ever shown) but remains clickable
-              to allow completion. */}
+              Single-click flow:
+                - Press once → status="completed" pushed → button immediately locks
+                  and shows "Executed" (no "In Progress" label ever shown).
+                - The user's online status still shows "Working on store X" (driven
+                  by userAreaMap which checks !bothDone) until BOTH buttons are
+                  pressed. Once bothDone=true, the user becomes IDLE and the store
+                  is fully locked to other users. */}
           {!store.disabled ? (
             <div className="grid grid-cols-2 gap-1.5">
               <UpdateActionButton
                 label="CFC"
-                sub={cfcCompleted ? "Done" : cfc?.status === "in-progress" ? "Executed" : "Push"}
+                sub={cfcCompleted ? "Executed" : "Push"}
                 color="emerald"
                 disabled={cfcLocked}
-                executing={cfc?.status === "in-progress"}
                 done={cfcCompleted}
-                onClick={() =>
-                  cfc?.status === "in-progress"
-                    ? onMarkDone(store, cfc)
-                    : onPush(store, "cfc-refresh")
-                }
+                onClick={() => onPush(store, "cfc-refresh")}
                 busy={busy}
               />
               <UpdateActionButton
                 label="AOO"
                 sub={
                   aooCompleted
-                    ? "Done"
+                    ? "Executed"
                     : !store.cfcDone
                     ? "Locked"
-                    : aoo?.status === "in-progress"
-                    ? "Executed"
                     : "Push"
                 }
                 color="amber"
                 disabled={aooLocked}
-                executing={aoo?.status === "in-progress"}
                 done={aooCompleted}
-                onClick={() =>
-                  aoo?.status === "in-progress"
-                    ? onMarkDone(store, aoo)
-                    : onPush(store, "aoo-manual-import")
-                }
+                onClick={() => onPush(store, "aoo-manual-import")}
                 busy={busy}
               />
             </div>
@@ -3677,7 +3683,6 @@ function UpdateActionButton({
   sub,
   color,
   disabled,
-  executing,
   done,
   onClick,
   busy,
@@ -3686,28 +3691,25 @@ function UpdateActionButton({
   sub: string;
   color: "emerald" | "amber";
   disabled: boolean;
-  executing: boolean;
   done: boolean;
   onClick: () => void;
   busy: boolean;
 }) {
   // Vertical stack layout: icon + label on top, sub-label below.
-  // Three visual states:
-  //   1. done (completed)         → pastel bg, fully locked, NOT clickable
-  //   2. executing (in-progress)  → solid bg, visually "locked" but CLICKABLE
-  //                                  to mark as completed (returns user to IDLE)
-  //   3. ready                    → outlined bg, clickable to push
-  //   4. disabled (locked)        → gray, not clickable
+  // Single-click flow: one press → status="completed" → button locks and
+  // shows "Executed". No "In Progress" label is ever shown on the button.
+  // The user's online status is tracked separately by userAreaMap (which
+  // checks !bothDone), so the user still appears as "working on store X"
+  // until BOTH CFC + AOO are pressed.
   const base =
     "h-12 rounded-md inline-flex flex-col items-center justify-center gap-0.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed px-1";
+  // Two visual states only:
+  //   1. done (pressed, status=completed) → pastel bg, locked, NOT clickable
+  //   2. ready / disabled                  → outlined bg (ready) or gray (locked)
   const cls = done
     ? color === "emerald"
       ? "bg-emerald-100 text-emerald-800 border border-emerald-200 cursor-not-allowed"
       : "bg-amber-100 text-amber-800 border border-amber-200 cursor-not-allowed"
-    : executing
-    ? color === "emerald"
-      ? "bg-emerald-600 text-white border border-emerald-600 hover:bg-emerald-700"
-      : "bg-amber-600 text-white border border-amber-600 hover:bg-amber-700"
     : disabled
     ? "bg-gray-50 text-gray-400 border border-gray-200"
     : color === "emerald"
@@ -3722,8 +3724,6 @@ function UpdateActionButton({
       {busy ? (
         <span className="h-3 w-3 rounded-full border-2 border-white/40 border-t-white animate-spin" />
       ) : done ? (
-        <CheckCircle2 className="w-3.5 h-3.5" />
-      ) : executing ? (
         <CheckCircle2 className="w-3.5 h-3.5" />
       ) : (
         <Plus className="w-3.5 h-3.5" />
