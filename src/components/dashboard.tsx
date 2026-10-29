@@ -484,13 +484,17 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
     const total = storesData?.totalActive ?? allActive.length;
     // Completed = both CFC + AOO done
     const completed = allActive.filter((s) => s.bothDone).length;
-    // In Progress = has at least one in-progress update, but not fully completed
+    // In Progress = CFC pressed but AOO not yet (incremental on CFC press,
+    // decremental on AOO press) OR has a Flag-issue (activeStatus) OR has a
+    // bulk menu-pull / deliverect-menu-pull in-progress. CFC/AOO updates are
+    // pushed with status="completed" immediately, so we detect "in-progress"
+    // by checking cfcDone/aooDone rather than the update status.
     const inProgress = allActive.filter((s) => {
       if (s.bothDone) return false;
+      if (s.cfcDone || s.aooDone) return true;
+      if (s.activeStatus) return true;
       const t = s.latestByType;
       return (
-        t["cfc-refresh"]?.status === "in-progress" ||
-        t["aoo-manual-import"]?.status === "in-progress" ||
         t["menu-pull"]?.status === "in-progress" ||
         t["deliverect-menu-pull"]?.status === "in-progress"
       );
@@ -515,10 +519,12 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
       } else if (s.id === "in-progress") {
         counts[s.id] = stores.filter((s) => {
           if (s.bothDone) return false;
+          // Incremental on CFC press, decremental on AOO press.
+          if (s.cfcDone || s.aooDone) return true;
+          // Flag-issue counts as in-progress too.
+          if (s.activeStatus) return true;
           const t = s.latestByType;
           return (
-            t["cfc-refresh"]?.status === "in-progress" ||
-            t["aoo-manual-import"]?.status === "in-progress" ||
             t["menu-pull"]?.status === "in-progress" ||
             t["deliverect-menu-pull"]?.status === "in-progress"
           );
@@ -636,10 +642,14 @@ export function Dashboard({ user, token, onSignOut }: DashboardProps) {
       const done = list.filter((s) => s.bothDone).length;
       const live = list.filter((s) => {
         if (s.bothDone) return false;
+        // "live" = CFC pressed but AOO not yet (incremental on CFC,
+        // decremental on AOO) OR has a Flag-issue (activeStatus). CFC/AOO
+        // updates are pushed with status="completed" so we detect "live" via
+        // cfcDone/aooDone rather than the update status.
+        if (s.cfcDone || s.aooDone) return true;
+        if (s.activeStatus) return true;
         const t = s.latestByType;
         return (
-          t["cfc-refresh"]?.status === "in-progress" ||
-          t["aoo-manual-import"]?.status === "in-progress" ||
           t["menu-pull"]?.status === "in-progress" ||
           t["deliverect-menu-pull"]?.status === "in-progress"
         );
@@ -3215,10 +3225,12 @@ function AreaColumn({
   const done = stores.filter((s) => s.bothDone).length;
   const live = stores.filter((s) => {
     if (s.bothDone) return false;
+    // Incremental on CFC press, decremental on AOO press.
+    if (s.cfcDone || s.aooDone) return true;
+    // Flag-issue counts as live too.
+    if (s.activeStatus) return true;
     const t = s.latestByType;
     return (
-      t["cfc-refresh"]?.status === "in-progress" ||
-      t["aoo-manual-import"]?.status === "in-progress" ||
       t["menu-pull"]?.status === "in-progress" ||
       t["deliverect-menu-pull"]?.status === "in-progress"
     );
